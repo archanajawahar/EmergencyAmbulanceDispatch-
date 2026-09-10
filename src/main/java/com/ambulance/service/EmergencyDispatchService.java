@@ -1,272 +1,352 @@
-package com.ambulance.service;
+package com.ambulance;
 
-import com.ambulance.exception.AmbulanceUnavailableException;
 import com.ambulance.exception.InvalidEmergencyRequestException;
 import com.ambulance.model.Ambulance;
 import com.ambulance.model.AmbulanceState;
+import com.ambulance.model.AmbulanceType;
+import com.ambulance.model.Driver;
 import com.ambulance.model.EmergencyRequest;
 import com.ambulance.model.EmergencyStatus;
+import com.ambulance.model.EmergencyType;
+import com.ambulance.service.EmergencyDispatchService;
+import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-import java.util.PriorityQueue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
-public class EmergencyDispatchService {
+public class EmergencyDispatchServiceTest {
 
-    private final List<Ambulance> ambulances = new ArrayList<>();
+    // 1. Critical emergency should get ICU/ALS ambulance
+    @Test
+    void testCriticalEmergencyGetsSuitableAmbulance() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-    private final List<EmergencyRequest> history =
-            new ArrayList<>();
+        Driver driver = new Driver("D001", "Arun", "9876543210");
+        Ambulance ambulance = new Ambulance(
+                "AMB001",
+                AmbulanceType.ICU,
+                driver,
+                5
+        );
 
-    private final PriorityQueue<EmergencyRequest> waitingQueue =
-            new PriorityQueue<>(
-                    Comparator.comparingInt(
-                            r -> r.getEmergencyType().getPriority()));
+        service.addAmbulance(ambulance);
 
-    private final AmbulanceAllocationService allocationService =
-            new AmbulanceAllocationService();
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.CRITICAL,
+                "Location A",
+                "Hospital A",
+                10
+        );
 
-    public void addAmbulance(Ambulance ambulance) {
+        service.submitEmergency(request);
 
-        if (ambulance == null) {
-            throw new IllegalArgumentException(
-                    "Ambulance cannot be null.");
-        }
+        assertEquals("AMB001",
+                request.getAssignedAmbulance().getAmbulanceId());
 
-        ambulances.add(ambulance);
+        assertEquals(EmergencyStatus.DISPATCHED,
+                request.getStatus());
     }
 
-    public void submitEmergency(EmergencyRequest request) {
+    // 2. One ambulance cannot be assigned to two active emergencies
+    @Test
+    void testAmbulanceCannotBeAssignedTwice() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        validateRequest(request);
+        Driver driver = new Driver("D001", "Arun", "9876543210");
+        Ambulance ambulance = new Ambulance(
+                "AMB001",
+                AmbulanceType.BASIC,
+                driver,
+                5
+        );
 
-        history.add(request);
+        service.addAmbulance(ambulance);
 
-        Ambulance ambulance =
-                allocationService.findBestAmbulance(
-                        request,
-                        ambulances);
+        EmergencyRequest request1 = new EmergencyRequest(
+                "P001",
+                EmergencyType.NORMAL,
+                "Location A",
+                "Hospital A",
+                10
+        );
 
-        if (ambulance == null) {
+        EmergencyRequest request2 = new EmergencyRequest(
+                "P002",
+                EmergencyType.NORMAL,
+                "Location B",
+                "Hospital B",
+                10
+        );
 
-            waitingQueue.offer(request);
+        service.submitEmergency(request1);
+        service.submitEmergency(request2);
 
-            System.out.println(
-                    "No suitable ambulance available.");
+        assertEquals(1, service.getWaitingQueueSize());
+        assertEquals("AMB001",
+                request1.getAssignedAmbulance().getAmbulanceId());
 
-            System.out.println(
-                    "Request added to waiting queue.");
-
-            return;
-        }
-
-        dispatch(request, ambulance);
+        assertNull(request2.getAssignedAmbulance());
     }
 
-    private void dispatch(
-            EmergencyRequest request,
-            Ambulance ambulance) {
+    // 3. Waiting request should get ambulance when it becomes available
+    @Test
+    void testWaitingRequestGetsAllocated() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        if (!ambulance.isAvailable()) {
+        Driver driver = new Driver("D001", "Arun", "9876543210");
+        Ambulance ambulance = new Ambulance(
+                "AMB001",
+                AmbulanceType.BASIC,
+                driver,
+                5
+        );
 
-            throw new AmbulanceUnavailableException(
-                    "Ambulance "
-                            + ambulance.getAmbulanceId()
-                            + " is already assigned.");
-        }
+        service.addAmbulance(ambulance);
 
-        ambulance.setState(
-                AmbulanceState.DISPATCHED);
+        EmergencyRequest request1 = new EmergencyRequest(
+                "P001",
+                EmergencyType.NORMAL,
+                "Location A",
+                "Hospital A",
+                10
+        );
 
-        request.setAssignedAmbulance(ambulance);
+        EmergencyRequest request2 = new EmergencyRequest(
+                "P002",
+                EmergencyType.NORMAL,
+                "Location B",
+                "Hospital B",
+                10
+        );
 
-        request.setStatus(
-                EmergencyStatus.DISPATCHED);
+        service.submitEmergency(request1);
+        service.submitEmergency(request2);
 
-        /*
-         * Assuming average ambulance speed = 40 km/h.
-         *
-         * Time in minutes =
-         * Distance / Speed × 60
-         */
-        double arrivalTime =
-                ambulance.getCurrentDistance()
-                        / 40.0 * 60.0;
+        assertEquals(1, service.getWaitingQueueSize());
 
-        request.setEstimatedArrivalTime(
-                arrivalTime);
+        service.updateAmbulanceState(
+                "AMB001",
+                AmbulanceState.AVAILABLE
+        );
 
-        System.out.println(
-                "Ambulance "
-                        + ambulance.getAmbulanceId()
-                        + " assigned to Patient "
-                        + request.getPatientId());
-
-        System.out.printf(
-                "Estimated arrival time: %.2f minutes%n",
-                arrivalTime);
+        assertEquals(0, service.getWaitingQueueSize());
+        assertEquals(EmergencyStatus.DISPATCHED,
+                request2.getStatus());
     }
 
-    public void updateAmbulanceState(
-            String ambulanceId,
-            AmbulanceState newState) {
+    // 4. Invalid patient ID should be rejected
+    @Test
+    void testInvalidRequest() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        Ambulance ambulance =
-                findAmbulance(ambulanceId);
+        EmergencyRequest request = new EmergencyRequest(
+                "",
+                EmergencyType.HIGH,
+                "Location A",
+                "Hospital A",
+                10
+        );
 
-        ambulance.setState(newState);
-
-        EmergencyRequest activeRequest =
-                history.stream()
-                        .filter(r ->
-                                r.getAssignedAmbulance()
-                                        == ambulance)
-                        .filter(r ->
-                                r.getStatus()
-                                        != EmergencyStatus.COMPLETED)
-                        .findFirst()
-                        .orElse(null);
-
-        if (activeRequest != null) {
-
-            switch (newState) {
-
-                case EN_ROUTE:
-
-                    activeRequest.setStatus(
-                            EmergencyStatus.EN_ROUTE);
-
-                    break;
-
-                case PATIENT_PICKED_UP:
-
-                    activeRequest.setStatus(
-                            EmergencyStatus.PATIENT_PICKED_UP);
-
-                    break;
-
-                case HOSPITAL_ARRIVED:
-
-                    activeRequest.setStatus(
-                            EmergencyStatus.HOSPITAL_ARRIVED);
-
-                    break;
-
-                case AVAILABLE:
-
-                    activeRequest.setStatus(
-                            EmergencyStatus.COMPLETED);
-
-                    allocateWaitingRequest();
-
-                    break;
-
-                default:
-                    break;
-            }
-        }
-
-        if (newState == AmbulanceState.AVAILABLE) {
-            allocateWaitingRequest();
-        }
+        assertThrows(
+                InvalidEmergencyRequestException.class,
+                () -> service.submitEmergency(request)
+        );
     }
 
-    private void allocateWaitingRequest() {
+    // 5. Estimated arrival time should be calculated correctly
+    @Test
+    void testEstimatedArrivalTime() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        if (waitingQueue.isEmpty()) {
-            return;
-        }
+        Driver driver = new Driver("D001", "Arun", "9876543210");
+        Ambulance ambulance = new Ambulance(
+                "AMB001",
+                AmbulanceType.BASIC,
+                driver,
+                20
+        );
 
-        EmergencyRequest selectedRequest =
-                waitingQueue.peek();
+        service.addAmbulance(ambulance);
 
-        Ambulance ambulance =
-                allocationService.findBestAmbulance(
-                        selectedRequest,
-                        ambulances);
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.NORMAL,
+                "Location A",
+                "Hospital A",
+                10
+        );
 
-        if (ambulance != null) {
+        service.submitEmergency(request);
 
-            waitingQueue.poll();
-
-            dispatch(
-                    selectedRequest,
-                    ambulance);
-        }
+        // 20 km / 40 km/h * 60 = 30 minutes
+        assertEquals(
+                30.0,
+                request.getEstimatedArrivalTime()
+        );
     }
 
-    private Ambulance findAmbulance(
-            String ambulanceId) {
+    // 6. Zero distance should be rejected
+    @Test
+    void testZeroDistanceIsInvalid() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        return ambulances.stream()
-                .filter(a ->
-                        a.getAmbulanceId()
-                                .equals(ambulanceId))
-                .findFirst()
-                .orElseThrow(() ->
-                        new AmbulanceUnavailableException(
-                                "Ambulance not found: "
-                                        + ambulanceId));
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.HIGH,
+                "Location A",
+                "Hospital A",
+                0
+        );
+
+        assertThrows(
+                InvalidEmergencyRequestException.class,
+                () -> service.submitEmergency(request)
+        );
     }
 
-    private void validateRequest(
-            EmergencyRequest request) {
+    // 7. Negative distance should be rejected
+    @Test
+    void testNegativeDistanceIsInvalid() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        if (request == null) {
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.HIGH,
+                "Location A",
+                "Hospital A",
+                -5
+        );
 
-            throw new InvalidEmergencyRequestException(
-                    "Emergency request cannot be null.");
-        }
-
-        if (request.getPatientId() == null
-                || request.getPatientId().isBlank()) {
-
-            throw new InvalidEmergencyRequestException(
-                    "Patient ID is required.");
-        }
-
-        if (request.getEmergencyType() == null) {
-
-            throw new InvalidEmergencyRequestException(
-                    "Emergency type is required.");
-        }
-
-        if (request.getPickupLocation() == null
-                || request.getPickupLocation().isBlank()) {
-
-            throw new InvalidEmergencyRequestException(
-                    "Pickup location is required.");
-        }
-
-        if (request.getDestinationHospital() == null
-                || request.getDestinationHospital().isBlank()) {
-
-            throw new InvalidEmergencyRequestException(
-                    "Destination hospital is required.");
-        }
-
-        if (request.getEstimatedDistance() <= 0) {
-
-            throw new InvalidEmergencyRequestException(
-                    "Distance must be greater than zero.");
-        }
+        assertThrows(
+                InvalidEmergencyRequestException.class,
+                () -> service.submitEmergency(request)
+        );
     }
 
-    public List<EmergencyRequest> getHistory() {
+    // 8. Missing pickup location should be rejected
+    @Test
+    void testMissingPickupLocation() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        return Collections.unmodifiableList(history);
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.MODERATE,
+                "",
+                "Hospital A",
+                10
+        );
+
+        assertThrows(
+                InvalidEmergencyRequestException.class,
+                () -> service.submitEmergency(request)
+        );
     }
 
-    public int getWaitingQueueSize() {
+    // 9. Missing destination hospital should be rejected
+    @Test
+    void testMissingDestinationHospital() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        return waitingQueue.size();
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.MODERATE,
+                "Location A",
+                "",
+                10
+        );
+
+        assertThrows(
+                InvalidEmergencyRequestException.class,
+                () -> service.submitEmergency(request)
+        );
     }
 
-    public List<Ambulance> getAmbulances() {
+    // 10. Critical emergency should not receive only a Basic ambulance
+    @Test
+    void testCriticalEmergencyWaitsWhenOnlyBasicAmbulanceIsAvailable() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
 
-        return Collections.unmodifiableList(
-                ambulances);
+        Driver driver = new Driver("D001", "Arun", "9876543210");
+        Ambulance ambulance = new Ambulance(
+                "AMB001",
+                AmbulanceType.BASIC,
+                driver,
+                5
+        );
+
+        service.addAmbulance(ambulance);
+
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.CRITICAL,
+                "Location A",
+                "Hospital A",
+                10
+        );
+
+        service.submitEmergency(request);
+
+        assertEquals(1, service.getWaitingQueueSize());
+        assertNull(request.getAssignedAmbulance());
+        assertEquals(EmergencyStatus.WAITING,
+                request.getStatus());
+    }
+
+    // 11. Ambulance state changes should update emergency status
+    @Test
+    void testAmbulanceStateTransitions() {
+        EmergencyDispatchService service = new EmergencyDispatchService();
+
+        Driver driver = new Driver("D001", "Arun", "9876543210");
+        Ambulance ambulance = new Ambulance(
+                "AMB001",
+                AmbulanceType.ADVANCED_LIFE_SUPPORT,
+                driver,
+                5
+        );
+
+        service.addAmbulance(ambulance);
+
+        EmergencyRequest request = new EmergencyRequest(
+                "P001",
+                EmergencyType.HIGH,
+                "Location A",
+                "Hospital A",
+                10
+        );
+
+        service.submitEmergency(request);
+
+        service.updateAmbulanceState(
+                "AMB001",
+                AmbulanceState.EN_ROUTE
+        );
+
+        assertEquals(
+                EmergencyStatus.EN_ROUTE,
+                request.getStatus()
+        );
+
+        service.updateAmbulanceState(
+                "AMB001",
+                AmbulanceState.PATIENT_PICKED_UP
+        );
+
+        assertEquals(
+                EmergencyStatus.PATIENT_PICKED_UP,
+                request.getStatus()
+        );
+
+        service.updateAmbulanceState(
+                "AMB001",
+                AmbulanceState.HOSPITAL_ARRIVED
+        );
+
+        assertEquals(
+                EmergencyStatus.HOSPITAL_ARRIVED,
+                request.getStatus()
+        );
     }
 }
